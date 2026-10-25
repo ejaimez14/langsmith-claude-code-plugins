@@ -25,12 +25,14 @@ import {
 } from "../langsmith.js";
 import { finalizeNotificationChain } from "../finalize.js";
 import { captureRun, initTracing, settledFromTurn } from "../tracing-engine.js";
+import { hashPrompt } from "../utils/ids/prompt-hash.js";
 import { stableRunId } from "../utils/ids/run-id.js";
 import {
   loadState,
   atomicUpdateState,
   getSessionState,
   advanceToolTracingProgress,
+  furtherRead,
 } from "../state.js";
 import { getTranscriptEndLine, readRuntimeVersion } from "../transcript.js";
 import { initHook, expandHome } from "../utils/hook-init.js";
@@ -211,6 +213,7 @@ export async function main(): Promise<void> {
         error: supersededNotificationAgentId
           ? "Superseded by a newer task-notification"
           : "User interrupt",
+        next_prompt_hash: hashPrompt(input.prompt),
       },
       { transcriptCut: true },
     );
@@ -336,6 +339,7 @@ export async function main(): Promise<void> {
         current_parent_run_id: parentRunId,
         current_turn_number: turnNum,
         current_turn_start: startTime,
+        current_turn_prompt_hash: hashPrompt(input.prompt),
         // If this is a task-notification turn, record the agent it's for so Stop
         // closes that agent's tool run + launching turn once this turn completes.
         current_notification_agent_id: notificationAgentId,
@@ -343,7 +347,7 @@ export async function main(): Promise<void> {
         // Persisted so the closing hooks can stamp them onto their runs.
         approval_policy: approvalPolicy,
         ...(runtimeVersion ? { runtime_version: runtimeVersion } : {}),
-        last_line: Math.max(ss.last_line, interruptedLastLine),
+        ...furtherRead(ss, { ...sessionState, last_line: interruptedLastLine }),
         turn_count: Math.max(ss.turn_count, countedTurns),
         // Clear this turn's stale data, but keep still-running background subagents
         // and any Agent tool runs left open awaiting their task-notification.
@@ -391,7 +395,7 @@ export async function closeInterruptedPrompt(
     sessionState.runtime_version;
   const supersededNotificationAgentId = sessionState.current_notification_agent_id;
   try {
-    const { lastLine, turnsTraced, consumedToolUseIds } = await closeInterruptedTurn({
+    const { position, turnsTraced, consumedToolUseIds } = await closeInterruptedTurn({
       defaultMuted: config.defaultMuted,
       sessionId: input.session_id,
       sessionState,
@@ -401,7 +405,8 @@ export async function closeInterruptedPrompt(
       runtimeVersion,
       approvalPolicy: input.permission_mode,
       error: input.error,
-      cutAtByte: closing.cut_bytes,
+      cutAt: closing.cut_at,
+      nextPromptHash: input.next_prompt_hash,
     });
     await atomicUpdateState(config.stateFilePath, (s) => {
       const ss = getSessionState(s, input.session_id);
@@ -410,7 +415,8 @@ export async function closeInterruptedPrompt(
         [input.session_id]: {
           ...ss,
           // Advance past the interrupted turn's messages so Stop doesn't re-trace them
-          last_line: Math.max(ss.last_line, lastLine),
+          ...furtherRead(ss, position),
+          read_turn_run_id: sessionState.current_turn_run_id,
           ...advanceToolTracingProgress(ss, consumedToolUseIds ?? [], "transcript"),
           turn_count: Math.max(ss.turn_count, sessionState.turn_count + turnsTraced),
         },

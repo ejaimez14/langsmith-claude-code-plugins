@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
-import { writeFileSync, mkdirSync, rmSync, statSync } from "node:fs";
+import { writeFileSync, mkdirSync, mkdtempSync, rmSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import {
@@ -12,6 +12,7 @@ import {
   resolveProvider,
   groupIntoTurns,
 } from "./transcript.js";
+import { hashPrompt } from "./utils/ids/prompt-hash.js";
 import type {
   UserMessage,
   ToolResultMessage,
@@ -31,6 +32,9 @@ beforeEach(() => {
 afterEach(() => {
   rmSync(tmpDir, { recursive: true, force: true });
 });
+
+const T0 = "2025-01-01T00:00:00Z";
+const T1 = "2025-01-01T00:01:00Z";
 
 function writeJsonl(filename: string, lines: object[]): string {
   const path = join(tmpDir, filename);
@@ -120,17 +124,15 @@ describe("readTranscript", () => {
       const first = [0, 1, 2]
         .map((pad) => makeUser("x".repeat(pad) + "\u4e2d".repeat(800_000)))
         .find((line) => (Buffer.from(JSON.stringify(line))[2 * 1024 * 1024] & 0xc0) === 0x80)!;
-      const before = writeJsonl("cut.jsonl", [first, makeAssistant("msg_1", "a")]);
-      const cut = statSync(before).size;
       const path = writeJsonl("cut.jsonl", [
         first,
         makeAssistant("msg_1", "a"),
-        makeAssistant("msg_2", "late"),
-        makeUser("Next"),
-        makeAssistant("msg_3", "c"),
+        makeAssistant("msg_2", "late", { ts: T1 }),
+        makeUser("Next", T1),
+        makeAssistant("msg_3", "c", { ts: T1 }),
       ]);
 
-      const { messages, lastLine } = read(path, -1, cut);
+      const { messages, lastLine } = read(path, -1, T0);
 
       expect(messages.map((m) => m.type)).toEqual(["user", "assistant", "assistant"]);
       expect(messages[0]).toEqual(first);
@@ -139,6 +141,93 @@ describe("readTranscript", () => {
       vi.doUnmock("./constants.js");
     },
   );
+
+  it("keeps a turn's own prompt and its follow-up lines but stops at the next turn's prompt", () => {
+    const own = makeUser("Own", T0, "p1");
+    const path = writeJsonl("own.jsonl", [
+      own,
+      makeAssistant("msg_1", "a"),
+      makeUser("Skill instructions", T0, "p1"),
+      makeAssistant("msg_2", "b"),
+      makeUser("Next", T1, "p2"),
+      makeAssistant("msg_3", "c"),
+    ]);
+    expect(readTranscript(path, -1, undefined, { promptAt: T0 }).lastLine).toBe(3);
+
+    const late = writeJsonl("late.jsonl", [
+      makeUser("Earlier"),
+      makeAssistant("msg_0", "z"),
+      own,
+      makeAssistant("msg_1", "a"),
+      makeUser("Next", T1, "p2"),
+    ]);
+    expect(readTranscript(late, 1, undefined, { promptAt: T0 }).lastLine).toBe(3);
+  });
+
+  it("resumes after its last read line when lines before it were removed", () => {
+    const path = writeJsonl("rewritten.jsonl", [
+      { ...makeAssistant("msg_0", "z"), uuid: "u1" },
+      { ...makeUser("Own", T1), uuid: "u2" },
+      { ...makeAssistant("msg_1", "a", { ts: T1 }), uuid: "u3" },
+    ]);
+    const read = readTranscript(path, 1, undefined, {}, { last_line_uuid: "u1", last_line_at: T0 });
+    expect(read.messages.map((m) => m.uuid)).toEqual(["u2", "u3"]);
+    expect(read.anchor).toEqual({ last_line_uuid: "u3", last_line_at: T1 });
+  });
+
+  it("leaves a line still being written for the next read once a cut is set", () => {
+    const own = JSON.stringify(makeUser("Own", T0));
+    const path = join(mkdtempSync(join(tmpdir(), "transcript-tail-")), "tail.jsonl");
+    writeFileSync(path, `${own}\n{"type":"assistant","mess`);
+    expect(readTranscript(path, -1, T1).lastLine).toBe(0);
+  });
+
+  it("keeps the last line id when the read ends on a line without one", () => {
+    const path = writeJsonl("untagged.jsonl", [
+      { ...makeUser("Own", T1), uuid: "u2" },
+      { type: "last-prompt", lastPrompt: "Own" },
+    ]);
+    expect(readTranscript(path).anchor).toEqual({ last_line_uuid: "u2", last_line_at: T1 });
+  });
+
+  it("falls back to time when its last read line is gone", () => {
+    const path = writeJsonl("lost.jsonl", [
+      { ...makeUser("Old", T0), uuid: "u0" },
+      { ...makeUser("Own", T1), uuid: "u2" },
+      { ...makeAssistant("msg_1", "a", { ts: T1 }), uuid: "u3" },
+    ]);
+    const read = readTranscript(path, 1, undefined, {}, { last_line_uuid: "u1", last_line_at: T0 });
+    expect(read.messages.map((m) => m.uuid)).toEqual(["u2", "u3"]);
+  });
+
+  it("keeps an unfinished earlier prompt and the turn's own prompt already on disk", () => {
+    const path = writeJsonl("backlog.jsonl", [
+      makeUser("Earlier", T0, "p0"),
+      makeAssistant("msg_0", "z"),
+      makeUser("Own", T0, "p1"),
+      makeAssistant("msg_1", "a"),
+    ]);
+    expect(readTranscript(path, -1, undefined, { promptAt: T1 }).lastLine).toBe(3);
+  });
+
+  it("ends the turn at a repeat of its own prompt text", () => {
+    const path = writeJsonl("repeat.jsonl", [
+      makeUser("Same", T0, "p1"),
+      makeAssistant("msg_1", "a"),
+      makeUser("Same", T0, "p2"),
+      makeAssistant("msg_2", "b"),
+    ]);
+    const turn = { promptAt: T0, promptHash: hashPrompt("Same") };
+    expect(readTranscript(path, -1, undefined, turn).lastLine).toBe(1);
+  });
+
+  it("reads past a malformed line inside the turn", () => {
+    const own = makeUser("Own", T0, "p1");
+    const path = join(mkdtempSync(join(tmpdir(), "transcript-bad-")), "bad.jsonl");
+    const lines = [JSON.stringify(own), "{not json", JSON.stringify(makeAssistant("msg_1", "a"))];
+    writeFileSync(path, `${lines.join("\n")}\n`);
+    expect(readTranscript(path, -1, undefined, { promptAt: T0 }).messages).toHaveLength(2);
+  });
 
   it("skips lines up to afterLine", () => {
     const path = writeJsonl("test.jsonl", [

@@ -105,8 +105,27 @@ export interface UserMessage {
     content: string;
   };
   timestamp: string;
+  uuid?: string;
   promptId?: string;
 }
+
+export interface TurnPrompt {
+  promptAt?: string;
+  promptHash?: string;
+  promptRead?: boolean;
+  nextPromptHash?: string;
+}
+
+export interface TranscriptRead {
+  messages: TranscriptMessage[];
+  lastLine: number;
+  laterPrompt: boolean;
+  anchor: ReadAnchor;
+}
+
+export type ReadAnchor = Pick<SessionState, "last_line_uuid" | "last_line_at">;
+
+export type ReadPosition = Pick<SessionState, "last_line"> & ReadAnchor;
 
 /** A tool result message in the transcript (also role: "user"). */
 export interface ToolResultMessage {
@@ -116,6 +135,7 @@ export interface ToolResultMessage {
     content: ToolResultBlock[];
   };
   timestamp: string;
+  uuid?: string;
   promptId?: string;
   /** Present on Task tool results — links to subagent transcript. */
   toolUseResult?: {
@@ -135,6 +155,7 @@ export interface AssistantMessage {
     stop_reason?: string | null;
   };
   timestamp: string;
+  uuid?: string;
   promptId?: string;
   effort?: string;
 }
@@ -260,6 +281,8 @@ export interface SessionState {
   /** Captured by PreCompact for async PostCompact (manual preference or auto turn mode). */
   compaction_tracing?: TracingMode;
   last_line: number;
+  last_line_uuid?: string;
+  last_line_at?: string;
   turn_count: number;
   updated: string;
   /** Current turn's run ID, set by UserPromptSubmit hook */
@@ -274,6 +297,8 @@ export interface SessionState {
   current_turn_number?: number;
   /** Current turn start time (ISO string) for duration calculation */
   current_turn_start?: string;
+  current_turn_prompt_hash?: string;
+  read_turn_run_id?: string;
   /** Permission mode for the current turn → coding-agent-v1 `approval_policy` (root/interrupted). */
   approval_policy?: string;
   /** Claude Code CLI version → coding-agent-v1 `ls_agent_runtime_version`. */
@@ -361,6 +386,7 @@ export type ClosingKind =
 
 export type InterruptedClosingInput = Omit<UserPromptSubmitHookInput, "prompt"> & {
   error: string;
+  next_prompt_hash?: string;
 };
 
 export type ClosingInput =
@@ -374,7 +400,7 @@ export type ClosingInput =
 export interface QueuedClosing {
   kind: ClosingKind;
   at: number;
-  cut_bytes?: number;
+  cut_at?: string;
   input: ClosingInput;
   session: SessionState;
 }
