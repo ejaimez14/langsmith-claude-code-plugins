@@ -36,7 +36,7 @@ import {
 } from "../state.js";
 import { getTranscriptEndLine, readRuntimeVersion } from "../transcript.js";
 import { initHook, expandHome } from "../utils/hook-init.js";
-import { isPayloadForHook } from "../utils/harness.js";
+import { isPayloadForHook, stripHarnessMarkup } from "../utils/harness.js";
 import { readStdin } from "../utils/stdin.js";
 import {
   KILLED_NOTIFICATION_STATUS,
@@ -290,7 +290,9 @@ export async function main(): Promise<void> {
       id: runId,
       name: USER_PROMPT_TURN_NAME,
       run_type: "chain",
-      inputs: { messages: [{ role: "user", content: input.prompt }] },
+      inputs: {
+        messages: [{ role: "user", content: stripHarnessMarkup(input.prompt) || input.prompt }],
+      },
       start_time: startTime,
       trace_id: traceId,
       dotted_order: dottedOrder,
@@ -333,6 +335,7 @@ export async function main(): Promise<void> {
       ...s,
       [input.session_id]: {
         ...ss,
+        updated: new Date().toISOString(),
         current_turn_tracing: turnMode,
         current_turn_run_id: runId,
         current_trace_id: traceId,
@@ -388,7 +391,8 @@ export async function closeInterruptedPrompt(
   config: Config,
 ): Promise<void> {
   const input = closing.input as InterruptedClosingInput;
-  const sessionState = closing.session;
+  const live = getSessionState(loadState(config.stateFilePath), input.session_id);
+  const sessionState = { ...closing.session, ...furtherRead(closing.session, live) };
   initTracing(config, input.cwd, input.session_id);
   const transcriptPath = expandHome(input.transcript_path);
   const runtimeVersion =
