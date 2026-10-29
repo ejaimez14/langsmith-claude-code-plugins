@@ -2,6 +2,8 @@
 set -eu
 
 RAN_CODES="0"
+VERSION="0.6.1"
+REPOSITORY="langchain-ai/langsmith-claude-code-plugins"
 
 root="${CLAUDE_PLUGIN_ROOT:-}"
 if [ -z "$root" ]; then
@@ -10,19 +12,37 @@ fi
 
 executable="langsmith-claude-code-tracing"
 case "$(uname -s)-$(uname -m)" in
-  Darwin-arm64)
-    preferred="$root/binary/$executable-darwin-arm64"
-    alternate="$root/binary/$executable-darwin-x64"
-    ;;
-  Darwin-x86_64)
-    preferred="$root/binary/$executable-darwin-x64"
-    alternate=""
-    ;;
-  *)
-    preferred=""
-    alternate=""
-    ;;
+  Darwin-arm64) asset="$executable-darwin-arm64-$VERSION" ;;
+  Darwin-x86_64) asset="$executable-darwin-x64-$VERSION" ;;
+  *) asset="" ;;
 esac
+
+cache="${CLAUDE_PLUGIN_DATA:-}"
+preferred=""
+alternate=""
+
+download() {
+  lock="$cache/bin/.downloading-$asset"
+  mkdir "$lock" 2>/dev/null || return 0
+  partial="$cache/bin/$asset.partial.$$"
+  base="https://github.com/$REPOSITORY/releases/download/$VERSION"
+  if curl -fsSL --max-time 300 -o "$partial" "$base/$asset" &&
+    expected="$(curl -fsSL --max-time 30 "$base/$asset.sha256" | cut -d' ' -f1)" &&
+    [ -n "$expected" ] &&
+    [ "$(shasum -a 256 "$partial" | cut -d' ' -f1)" = "$expected" ] &&
+    chmod +x "$partial"; then
+    mv -f "$partial" "$cache/bin/$asset" || :
+  fi
+  rm -f "$partial" || :
+  rmdir "$lock" || :
+}
+
+if [ -n "$cache" ] && [ -n "$asset" ]; then
+  preferred="$cache/bin/$asset"
+  if [ ! -x "$preferred" ] && mkdir -p "$cache/bin" 2>/dev/null; then
+    ( download ) </dev/null >/dev/null 2>&1 &
+  fi
+fi
 
 ran() {
   case " $RAN_CODES " in
